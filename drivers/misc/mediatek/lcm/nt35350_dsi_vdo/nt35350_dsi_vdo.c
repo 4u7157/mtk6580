@@ -1,7 +1,7 @@
 #include <linux/string.h>
 #include <linux/kernel.h>
-#include <mach/mt_gpio.h>
-#include <mach/mt_pm_ldo.h>
+#include <mt-plat/mt_gpio.h>
+#include <mt-plat/mt_pm_ldo.h>
 
 #include "cust_gpio_usage.h"
 
