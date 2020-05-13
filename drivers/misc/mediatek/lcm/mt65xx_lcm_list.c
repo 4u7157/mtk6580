@@ -993,6 +993,10 @@ LCM_DRIVER *lcm_driver_list[] = {
 	&rm67160_400x400_dsi_cmd_oled_drv,
 #endif
 
+#if defined(NT35350_DSI_VDO)
+	&nt35350_dsi_vdo_lcm_drv,
+#endif
+
 };
 
 unsigned char lcm_name_list[][128] = {
