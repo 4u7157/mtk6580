@@ -1666,4 +1666,11 @@
 		interrupts = <13 4>;
 		debounce = <13 1000>;
 	};
+
+	GSE_2@1 {
+		compatible = "mediatek, GSE_2-eint";
+		interrupt-parent = <0x2>;
+		interrupts = <0x1 0x8>;
+		debounce = <0x1 0x0>;
+	};
 };
