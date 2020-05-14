@@ -4897,7 +4897,6 @@ void show_state_filter(unsigned long state_filter)
 	if (!state_filter)
 		debug_show_all_locks();
 }
-<<<<<<< HEAD
 
 void init_idle_bootup_task(struct task_struct *idle)
 {
@@ -5043,8 +5042,6 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
 	/* Can the task run on the task's current CPU? If so, we're done */
 	if (cpumask_test_cpu(task_cpu(p), new_mask))
 		goto out;
-=======
->>>>>>> 6cd09de653f3... Merge 3.18.41 into android-3.18
 
 	dest_cpu = cpumask_any_and(cpu_active_mask, new_mask);
 	if (task_running(rq, p) || p->state == TASK_WAKING) {
