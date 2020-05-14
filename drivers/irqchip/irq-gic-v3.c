@@ -16,6 +16,7 @@
  */
 
 #include <linux/cpu.h>
+#include <linux/cpu_pm.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/of.h>
@@ -116,7 +117,7 @@ static void gic_redist_wait_for_rwp(void)
 }
 
 
-static void gic_enable_redist(void)
+static void gic_enable_redist(bool enable)
 {
 	void __iomem *rbase;
 	u32 count = 1000000;	/* 1s! */
@@ -124,20 +125,30 @@ static void gic_enable_redist(void)
 
 	rbase = gic_data_rdist_rd_base();
 
-	/* Wake up this CPU redistributor */
 	val = readl_relaxed(rbase + GICR_WAKER);
-	val &= ~GICR_WAKER_ProcessorSleep;
+	if (enable)
+		/* Wake up this CPU redistributor */
+		val &= ~GICR_WAKER_ProcessorSleep;
+	else
+		val |= GICR_WAKER_ProcessorSleep;
 	writel_relaxed(val, rbase + GICR_WAKER);
 
-	while (readl_relaxed(rbase + GICR_WAKER) & GICR_WAKER_ChildrenAsleep) {
-		count--;
-		if (!count) {
-			pr_err_ratelimited("redist didn't wake up...\n");
-			return;
-		}
+	if (!enable) {		/* Check that GICR_WAKER is writeable */
+		val = readl_relaxed(rbase + GICR_WAKER);
+		if (!(val & GICR_WAKER_ProcessorSleep))
+			return;	/* No PM support in this redistributor */
+	}
+
+	while (--count) {
+		val = readl_relaxed(rbase + GICR_WAKER);
+		if (enable ^ (val & GICR_WAKER_ChildrenAsleep))
+			break;
 		cpu_relax();
 		udelay(1);
 	};
+	if (!count)
+		pr_err_ratelimited("redistributor failed to %s...\n",
+				   enable ? "wakeup" : "sleep");
 }
 
 /*
@@ -384,23 +395,14 @@ static void gic_cpu_init(void)
 	if (gic_populate_rdist())
 		return;
 
-	gic_enable_redist();
+	gic_enable_redist(true);
 
 	rbase = gic_data_rdist_sgi_base();
 
 	gic_cpu_config(rbase, gic_redist_wait_for_rwp);
 
-	/* Enable system registers */
-	gic_enable_sre();
-
-	/* Set priority mask register */
-	gic_write_pmr(DEFAULT_PMR_VALUE);
-
-	/* EOI deactivates interrupt too (mode 0) */
-	gic_write_ctlr(ICC_CTLR_EL1_EOImode_drop_dir);
-
-	/* ... and let's hit the road... */
-	gic_write_grpen1(1);
+	/* initialise system registers */
+	gic_cpu_sys_reg_init();
 }
 
 #ifdef CONFIG_SMP
@@ -454,17 +456,21 @@ out:
 	return tlist;
 }
 
+#define MPIDR_TO_SGI_AFFINITY(cluster_id, level) \
+	(MPIDR_AFFINITY_LEVEL(cluster_id, level) \
+		<< ICC_SGI1R_AFFINITY_## level ##_SHIFT)
+
 static void gic_send_sgi(u64 cluster_id, u16 tlist, unsigned int irq)
 {
 	u64 val;
 
-	val = (MPIDR_AFFINITY_LEVEL(cluster_id, 3) << 48	|
-		MPIDR_AFFINITY_LEVEL(cluster_id, 2) << 32	|
-		irq << 24					|
-		MPIDR_AFFINITY_LEVEL(cluster_id, 1) << 16	|
-		tlist);
+	val = (MPIDR_TO_SGI_AFFINITY(cluster_id, 3)	|
+	       MPIDR_TO_SGI_AFFINITY(cluster_id, 2)	|
+	       irq << ICC_SGI1R_SGI_ID_SHIFT		|
+	       MPIDR_TO_SGI_AFFINITY(cluster_id, 1)	|
+	       tlist << ICC_SGI1R_TARGET_LIST_SHIFT);
 
-	pr_debug("CPU%d: ICC_SGI1R_EL1 %llx\n", smp_processor_id(), val);
+	pr_devel("CPU%d: ICC_SGI1R_EL1 %llx\n", smp_processor_id(), val);
 	gic_write_sgi1r(val);
 }
 
@@ -479,7 +485,7 @@ static void gic_raise_softirq(const struct cpumask *mask, unsigned int irq)
 	 * Ensure that stores to Normal memory are visible to the
 	 * other CPUs before issuing the IPI.
 	 */
-	smp_wmb();
+	wmb();
 
 	for_each_cpu_mask(cpu, *mask) {
 		unsigned long cluster_id = cpu_logical_map(cpu) & ~0xffUL;
@@ -508,6 +514,9 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	u64 val;
 
 #ifndef CONFIG_MTK_IRQ_NEW_DESIGN
+	if (cpu >= nr_cpu_ids)
+		return -EINVAL;
+
 	if (gic_irq_in_rdist(d))
 		return -EINVAL;
 
@@ -546,6 +555,9 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	if (!force && (cpumask_first_and(mask_val, cpu_online_mask) >= nr_cpu_ids))
 		return -EINVAL;
 
+	if (cpu >= nr_cpu_ids)
+		return -EINVAL;
+
 	if (gic_irq_in_rdist(d))
 		return -EINVAL;
 
@@ -581,6 +593,33 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 #define gic_set_affinity	NULL
 #define gic_smp_init()		do { } while (0)
 #endif
+
+#ifdef CONFIG_CPU_PM
+static int gic_cpu_pm_notifier(struct notifier_block *self,
+			       unsigned long cmd, void *v)
+{
+	if (cmd == CPU_PM_EXIT) {
+		gic_enable_redist(true);
+		gic_cpu_sys_reg_init();
+	} else if (cmd == CPU_PM_ENTER) {
+		gic_write_grpen1(0);
+		gic_enable_redist(false);
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block gic_cpu_pm_notifier_block = {
+	.notifier_call = gic_cpu_pm_notifier,
+};
+
+static void gic_cpu_pm_init(void)
+{
+	cpu_pm_register_notifier(&gic_cpu_pm_notifier_block);
+}
+
+#else
+static inline void gic_cpu_pm_init(void) { }
+#endif /* CONFIG_CPU_PM */
 
 static struct irq_chip gic_chip = {
 	.name			= "GICv3",
@@ -748,6 +787,7 @@ static int __init gic_of_init(struct device_node *node,
 	gic_smp_init();
 	gic_dist_init();
 	gic_cpu_init();
+	gic_cpu_pm_init();
 
 	mt_gic_ext_init();
 
