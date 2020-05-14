@@ -176,20 +176,19 @@ static void mt_bio_init_ctx(struct mt_bio_context *ctx, struct task_struct *thre
 		mt_bio_init_task(&ctx->task[i]);
 }
 
-void mt_bio_queue_alloc(struct task_struct *thread)
+void mt_bio_queue_alloc(struct task_struct *thread, struct request_queue *q)
 {
 	int i;
 	pid_t pid;
+	struct mt_bio_context *ctx = BTAG_CTX(mtk_btag_mmc);
 
 	pid = task_pid_nr(thread);
 
 	for (i = 0; i < MMC_BIOLOG_CONTEXTS; i++)	{
-		struct mt_bio_context *ctx = &mt_bio_reqctx[i];
-
-		if (ctx->pid == pid)
+		if (ctx[i].pid == pid)
 			break;
-		if (ctx->pid == 0) {
-			mt_bio_init_ctx(ctx, thread);
+		if (ctx[i].pid == 0) {
+			mt_bio_init_ctx(&ctx[i], thread, q);
 			break;
 		}
 	}
